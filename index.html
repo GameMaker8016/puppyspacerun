@@ -1,0 +1,96 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Puppy Space Run</title>
+<style>
+  body { margin: 0; overflow: hidden; background: black; }
+  canvas { display: block; margin: 0 auto; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+// Basic Puppy Space Run game code placeholder
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+let rocket = { x: canvas.width/2, y: canvas.height/2, speed: 6, size: 80 };
+let debris = [];
+let lives = 5;
+let level = 1;
+let timeLeft = 8 * 60; // 8 seconds at 60fps
+let puppyImage = new Image();
+puppyImage.src = 'https://placekitten.com/200/200'; // placeholder puppy
+
+document.addEventListener('keydown', e => {
+  if(e.key === 'ArrowUp') rocket.y -= rocket.speed;
+  if(e.key === 'ArrowDown') rocket.y += rocket.speed;
+  if(e.key === 'ArrowLeft') rocket.x -= rocket.speed;
+  if(e.key === 'ArrowRight') rocket.x += rocket.speed;
+  if(e.key === ' ') rocket.y -= rocket.speed*2; // boost
+});
+
+function spawnDebris() {
+  if (Math.random() < 0.02) {
+    debris.push({x: Math.random()*canvas.width, y: -20, size: 30, speed: 3 + level});
+  }
+}
+
+function drawRocket() {
+  ctx.drawImage(puppyImage, rocket.x - rocket.size/2, rocket.y - rocket.size/2, rocket.size, rocket.size);
+}
+
+function drawDebris() {
+  ctx.fillStyle = 'gray';
+  debris.forEach(d => ctx.fillRect(d.x, d.y, d.size, d.size));
+}
+
+function updateDebris() {
+  debris.forEach(d => d.y += d.speed);
+  debris = debris.filter(d => d.y < canvas.height+50);
+}
+
+function checkCollisions() {
+  debris.forEach(d => {
+    if (Math.abs(d.x - rocket.x) < (d.size + rocket.size)/2 && Math.abs(d.y - rocket.y) < (d.size + rocket.size)/2) {
+      lives--;
+      d.y = canvas.height+100; // remove
+    }
+  });
+}
+
+function nextLevel() {
+  level++;
+  timeLeft = 8 * 60;
+  debris = [];
+}
+
+function gameLoop() {
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  drawRocket();
+  drawDebris();
+  spawnDebris();
+  updateDebris();
+  checkCollisions();
+  
+  timeLeft--;
+  if (timeLeft <= 0) nextLevel();
+  if (lives <= 0) {
+    ctx.fillStyle = 'white';
+    ctx.font = '48px sans-serif';
+    ctx.fillText('Game Over', canvas.width/2 - 100, canvas.height/2);
+    return;
+  }
+  
+  requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>

@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Puppy Space Run — Planet Transitions</title>
+<style>
+  html, body { height:100%; margin:0; background:#000; font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color:#fff; }
+  #wrap { display:flex; flex-direction:column; gap:.5rem; max-width:900px; margin:0 auto; padding:12px; }
+  #hud { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
+  #hud > * { margin-right:8px; }
+  #game { width:100%; height:auto; background:#000; border:1px solid #333; border-radius:8px; touch-action:none; }
+  button, input[type="file"] { background:#181a1f; color:#fff; border:1px solid #333; padding:.5rem .75rem; border-radius:6px; cursor:pointer; }
+  .pill { padding:.25rem .5rem; border-radius:999px; background:#101218; border:1px solid #2a2f3a; }
+  #modal {
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+    background:rgba(0,0,0,.6); z-index:10; padding:16px;
+  }
+  #modal .card {
+    background:#0e1116; border:1px solid #2a2f3a; border-radius:12px; padding:20px; max-width:520px; text-align:center;
+  }
+  #modal button { margin-top:12px; }
+  small.hint { opacity:.75 }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="hud">
+      <span class="pill">Lives: <span id="lives">5</span></span>
+      <span class="pill">Level: <span id="level">Moon</span></span>
+      <span class="pill">Distance: <span id="dist">0</span> km</span>
+      <input id="file" type="file" accept="image/*" />
+      <button id="restart">Restart</button>
+      <small class="hint">Controls: ↑ ↓ ← → and Space (boost)</small>
+    </div>
+    <canvas id="game" width="900" height="600" aria-label="Puppy Space Run"></canvas>
+  </div>
+
+  <div id="modal">
+    <div class="card">
+      <h2 id="modal-title">You Win!</h2>
+      <p id="modal-desc"></p>
+      <button id="play-again">Play again</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // --- Responsive sizing ---
+  function fitCanvas() {
+    const maxW = Math.min(window.innerWidth - 24, 900);
+    const aspect = canvas.height / canvas.width;
+    canvas.style.width = maxW + 'px';
+    canvas.style.height = (maxW * aspect) + 'px';
+  }
+  window.addEventListener('resize', fitCanvas);
+  fitCanvas();
+
+  // --- DOM ---
+  const livesEl = document.getElementById('lives');
+  const levelEl = document.getElementById('level');
+  const distEl = document.getElementById('dist');
+  const fileInput = document.getElementById('file');
+  const restartBtn = document.getElementById('restart');
+  const modal = document.getElementById('modal');
+  const modalTitle = document.getElementById('modal-title');
+  const modalDesc = document.getElementById('modal-desc');
+  const playAgain = document.getElementById('play-again');
+
+  // Prevent scrolling with keys
+  window.addEventListener('keydown', (e) => {
+    if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  }, { passive:false });
+
+  // --- Puppy image with persistence ---
+  const puppyImg = new Image();
+  let hasPuppy = false;
+
+  function loadPersistedImage(){
+    try {
+      const saved = localStorage.getItem('puppyDataURL');
+      if (saved) {
+        puppyImg.onload = () => { hasPuppy = true; };
+        puppyImg.src = saved;
+      }
+    } catch {}
+  }
+  loadPersistedImage();
+
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataURL = reader.result;
+      puppyImg.onload = () => { hasPuppy = true; };
+      puppyImg.src = dataURL;
+      try { localStorage.setItem('puppyDataURL', dataURL); } catch {}
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // --- Game State ---
+  const rocket = {
+    x: canvas.width*0.5,
+    y: canvas.height*0.72,
+    speed: 2.6,
+    boost: 7.0,
+    boostCooldown: 0,
+    radius: 32,          // bigger rocket
+    invulnMs: 0
+  };
+
+  // Level themes: slightly longer distances; debris ramps across levels; unique debris styles.
+  const LEVELS = [
+    { name: "Moon",    dist:  320, debrisRate: 0.006, debrisSpeed: [1.1, 1.8], bg: "#06080f",
+      planetColor: "#bfc5cc", debrisTypes: ["rock"], accent: "#8f949a" },
+    { name: "Venus",   dist:  800, debrisRate: 0.010, debrisSpeed: [1.3, 2.1], bg: "#120d0b",
+      planetColor: "#e0a95a", debrisTypes: ["orb","cloud"], accent: "#f2c97a" },
+    { name: "Mercury", dist: 1600, debrisRate: 0.018, debrisSpeed: [1.6, 2.4], bg: "#0a0a0f",
+      planetColor: "#9a938b", debrisTypes: ["shard","rock"], accent: "#c2bbb2" },
+    { name: "Sun",     dist: 2400, debrisRate: 0.024, debrisSpeed: [1.8, 2.8], bg: "#190e05",
+      planetColor: "#ffb02e", debrisTypes: ["fireball"], accent: "#ffda6a" },
+  ];
+  let levelIdx = 0;
+
+  let lives = 5;
+  let distance = 0;
+  let debris = [];
+  let stars = [];
+  let running = true;
+  let transitioning = false;
+  let transitionStart = 0;
+  let transitionTargetName = "";
+  let lastTime = 0;
+
+  // Stars
+  function resetStars() {
+    stars = [];
+    for (let i=0;i<160;i++) {
+      stars.push({
+        x: Math.random()*canvas.width,
+        y: Math.random()*canvas.height,
+        s: Math.random()*1.6+0.2,
+        spd: Math.random()*0.6+0.2
+      });
+    }
+  }
+  resetStars();
+
+  // Input
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    if (e.key === ' ') {
+      if (rocket.boostCooldown <= 0 && !transitioning) {
+        rocket.boostCooldown = 350;
+        rocket.y -= rocket.boost;
+      }
+    } else {
+      keys.add(e.key);
+    }
+  });
+  window.addEventListener('keyup', (e) => keys.delete(e.key));
+
+  // Touch / drag
+  let dragging = false;
+  canvas.addEventListener('pointerdown', e => { dragging = true; moveToPointer(e); });
+  canvas.addEventListener('pointermove',  e => { if (dragging) moveToPointer(e); });
+  window.addEventListener('pointerup', () => dragging = false);
+  function moveToPointer(e){
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width/rect.width);
+    const y = (e.clientY - rect.top ) * (canvas.height/rect.height);
+    rocket.x = x; rocket.y = y; clampRocket();
+  }
+
+  // Utils
+  function clampRocket() {
+    const r = rocket.radius;
+    rocket.x = Math.min(canvas.width - r, Math.max(r, rocket.x));
+    rocket.y = Math.min(canvas.height - r, Math.max(r, rocket.y));
+  }
+  function rand(a,b){ return a + Math.random()*(b-a); }
+
+  function spawnDebris(dt){
+    if (transitioning) return; // no new spawns during transition
+    const L = LEVELS[levelIdx];
+    const chance = L.debrisRate * dt; // ms-based spawn
+    if (Math.random() < chance) {
+      const size = rand(12, 30);
+      const type = L.debrisTypes[Math.floor(Math.random()*L.debrisTypes.length)];
+      const fromTop = Math.random() < 0.7;
+      let x, y, vx, vy;
+      if (fromTop) {
+        x = Math.random()*canvas.width;
+        y = -size;
+        vx = rand(-0.3,0.3);
+        vy = rand(L.debrisSpeed[0], L.debrisSpeed[1]);
+      } else {
+        const left = Math.random() < 0.5;
+        x = left ? -size : canvas.width + size;
+        y = Math.random()*canvas.height*0.9;
+        vx = left ? rand(0.6, 1.1) : rand(-1.1, -0.6);
+        vy = rand(0.7, 1.4);
+      }
+      debris.push({x,y,vx,vy,size,hit:false,spin:rand(-0.03,0.03),rot:0,type});
+    }
+  }
+
+  function resetGame() {
+    lives = 5;
+    distance = 0;
+    debris = [];
+    levelIdx = 0;
+    transitioning = false;
+    rocket.x = canvas.width*0.5;
+    rocket.y = canvas.height*0.76;
+    rocket.boostCooldown = 0;
+    rocket.invulnMs = 800; // brief grace
+    resetStars();
+    running = true;
+    modal.style.display = 'none';
+    updateHUD();
+    requestAnimationFrame(step);
+  }
+
+  function updateHUD() {
+    livesEl.textContent = String(lives);
+    levelEl.textContent = LEVELS[levelIdx].name;
+    distEl.textContent  = Math.floor(distance);
+  }
+
+  restartBtn.onclick = () => resetGame();
+  playAgain.onclick  = () => resetGame();
+
+  // Drawing
+  function drawStars(dt){
+    const L = LEVELS[levelIdx];
+    canvas.style.background = L.bg;
+    for (const s of stars) {
+      s.y += (s.spd + levelIdx*0.15) * (dt/16.7);
+      if (s.y > canvas.height) { s.y = -2; s.x = Math.random()*canvas.width; }
+      ctx.globalAlpha = 0.6 + s.s*0.2;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(s.x, s.y, s.s, s.s);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function roundRect(ctx, x, y, w, h, r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr, y);
+    ctx.arcTo(x+w, y, x+w, y+h, rr);
+    ctx.arcTo(x+w, y+h, x, y+h, rr);
+    ctx.arcTo(x, y+h, x, y, rr);
+    ctx.arcTo(x, y, x+w, y, rr);
+    ctx.closePath();
+  }
+
+  function drawRocket(){
+    const {x,y} = rocket;
+    ctx.save();
+    ctx.translate(x,y);
+
+    const invulnFlash = rocket.invulnMs > 0 ? (Math.floor(performance.now()/100)%2===0) : false;
+
+    // Flame
+    const flick = (Math.sin(performance.now()/70)+1)*0.5;
+    ctx.beginPath();
+    ctx.moveTo(-14, 30);
+    ctx.lineTo(0, 30 + 12 + flick*6);
+    ctx.lineTo(14, 30);
+    ctx.closePath();
+    ctx.fillStyle = invulnFlash ? '#ffd966' : '#ffb000';
+    ctx.fill();
+
+    // Body
+    ctx.fillStyle = invulnFlash ? '#e7ecf5' : '#d0d4db';
+    roundRect(ctx, -22, -34, 44, 68, 12);
+    ctx.fill();
+
+    // Nose
+    ctx.beginPath();
+    ctx.moveTo(-22, -34);
+    ctx.lineTo(0, -54);
+    ctx.lineTo(22, -34);
+    ctx.closePath();
+    ctx.fillStyle = invulnFlash ? '#c5ccd6' : '#9aa3ad';
+    ctx.fill();
+
+    // Fins
+    ctx.fillStyle = '#ff4b4b';
+    ctx.beginPath(); ctx.moveTo(-22, 6); ctx.lineTo(-34, 22); ctx.lineTo(-22, 24); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo( 22, 6); ctx.lineTo( 34, 22); ctx.lineTo( 22, 24); ctx.closePath(); ctx.fill();
+
+    // Puppy window
+    const winR = 22;
+    const winX = 0;
+    const winY = -6;
+
+    // Bezel
+    ctx.beginPath(); ctx.arc(winX, winY, winR+3, 0, Math.PI*2);
+    ctx.fillStyle = '#2b2f39'; ctx.fill();
+
+    // Window glass
+    ctx.beginPath(); ctx.arc(winX, winY, winR, 0, Math.PI*2);
+    ctx.fillStyle = '#a9c7ff22'; ctx.fill();
+    ctx.strokeStyle = '#a9c7ff55'; ctx.lineWidth = 2; ctx.stroke();
+
+    // Draw puppy face
+    if ((hasPuppy || puppyImg.complete) && puppyImg.naturalWidth > 0) {
+      ctx.save();
+      ctx.beginPath(); ctx.arc(winX, winY, winR-1, 0, Math.PI*2); ctx.clip();
+      const d = (winR-1)*2;
+      const s = Math.min(puppyImg.naturalWidth, puppyImg.naturalHeight);
+      const sx = (puppyImg.naturalWidth  - s)/2;
+      const sy = (puppyImg.naturalHeight - s)/2;
+      ctx.drawImage(puppyImg, sx, sy, s, s, winX-d/2, winY-d/2, d, d);
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  function drawDebris(){
+    for (const d of debris) {
+      ctx.save();
+      ctx.translate(d.x, d.y);
+      ctx.rotate(d.rot);
+      renderDebrisByType(d);
+      ctx.restore();
+    }
+  }
+
+  function renderDebrisByType(d){
+    const L = LEVELS[levelIdx];
+    switch(d.type){
+      case "rock": // gray rounded rock
+        ctx.fillStyle = '#8b8d93';
+        roundRect(ctx, -d.size/2, -d.size/2, d.size, d.size, 6);
+        ctx.fill();
+        break;
+      case "cloud": // soft hazy blob (venus)
+        const g = ctx.createRadialGradient(0,0, d.size*0.1, 0,0, d.size*0.6);
+        g.addColorStop(0, "#ffd59b88");
+        g.addColorStop(1, "#80551511");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(0,0,d.size*0.7,0,Math.PI*2);
+        ctx.fill();
+        break;
+      case "orb": // smooth orb
+        ctx.fillStyle = L.accent || "#f2c97a";
+        ctx.beginPath();
+        ctx.arc(0,0,d.size*0.45,0,Math.PI*2);
+        ctx.fill();
+        break;
+      case "shard": // metallic triangle
+        ctx.fillStyle = '#bfc5cc';
+        ctx.beginPath();
+        ctx.moveTo(-d.size*0.5, d.size*0.4);
+        ctx.lineTo(d.size*0.6, 0);
+        ctx.lineTo(-d.size*0.3, -d.size*0.6);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      case "fireball": // glowing sun ember
+        const rg = ctx.createRadialGradient(0,0, d.size*0.1, 0,0, d.size*0.6);
+        rg.addColorStop(0, "#fff2b3");
+        rg.addColorStop(1, "#ff7f00");
+        ctx.fillStyle = rg;
+        ctx.beginPath();
+        ctx.arc(0,0,d.size*0.6,0,Math.PI*2);
+        ctx.fill();
+        break;
+      default: // fallback
+        ctx.fillStyle = '#8b8d93';
+        roundRect(ctx, -d.size/2, -d.size/2, d.size, d.size, 6);
+        ctx.fill();
+    }
+  }
+
+  function drawHUD(){
+    const g = ctx.createLinearGradient(0,0,0,80);
+    g.addColorStop(0, '#000000aa'); g.addColorStop(1, '#00000000');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,canvas.width,80);
+
+    // Progress toward next level
+    const L = LEVELS[levelIdx];
+    const prevDist = levelIdx === 0 ? 0 : LEVELS[levelIdx-1].dist;
+    const nextDist = L.dist;
+    const span = nextDist - prevDist;
+    const prog = Math.min(1, Math.max(0, (distance - prevDist)/span));
+    const barW = Math.min(500, canvas.width - 40);
+    const x = 20, y = 50, h = 8;
+
+    ctx.fillStyle = '#2b2f39'; roundRect(ctx, x, y, barW, h, 4); ctx.fill();
+    ctx.fillStyle = '#6ab0ff'; roundRect(ctx, x, y, barW*prog, h, 4); ctx.fill();
+  }
+
+  // Planet transition animation
+  function startPlanetTransition(nextName){
+    transitioning = true;
+    transitionStart = performance.now();
+    transitionTargetName = nextName;
+  }
+
+  function drawPlanetTransition(ts){
+    const duration = 1200; // ms
+    const t = Math.min(1, (ts - transitionStart)/duration);
+    const next = LEVELS[Math.min(levelIdx+1, LEVELS.length-1)];
+    const color = next.planetColor || "#888";
+    // freeze gameplay visuals underneath
+    // draw a giant growing planet circle
+    const maxR = Math.hypot(canvas.width, canvas.height);
+    const r = (0.2 + 1.2*t) * maxR*0.5;
+    ctx.save();
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(canvas.width/2, canvas.height/2, r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // Label
+    ctx.fillStyle = "#000000cc";
+    ctx.font = "bold 28px system-ui, -apple-system, Segoe UI, Roboto";
+    ctx.textAlign = "center";
+    ctx.fillText(next.name, canvas.width/2, canvas.height/2 + 12);
+
+    if (t >= 1) {
+      // Finish transition: advance level
+      levelIdx = Math.min(levelIdx+1, LEVELS.length-1);
+      updateHUD();
+      transitioning = false;
+      rocket.invulnMs = 900; // grace as play resumes
+    }
+  }
+
+  // --- Game loop ---
+  function step(ts){
+    if (!lastTime) lastTime = ts;
+    const dt = Math.min(50, ts - lastTime);
+    lastTime = ts;
+    if (!running) return;
+
+    // Movement (pause during transition)
+    if (!transitioning) {
+      const accel = rocket.speed * (dt/16.7);
+      if (keys.has('ArrowLeft'))  rocket.x -= accel;
+      if (keys.has('ArrowRight')) rocket.x += accel;
+      if (keys.has('ArrowUp'))    rocket.y -= accel;
+      if (keys.has('ArrowDown'))  rocket.y += accel;
+      rocket.y -= 0.3 * (dt/16.7);
+      rocket.boostCooldown -= dt;
+      if (rocket.invulnMs > 0) rocket.invulnMs -= dt;
+      clampRocket();
+      distance += (1.25 + levelIdx*0.15) * (dt/16.7);
+    }
+
+    // draw background & stars
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawStars(dt);
+
+    // debris update
+    if (!transitioning) {
+      spawnDebris(dt);
+      for (const d of debris) {
+        d.x += d.vx * (dt/16.7);
+        d.y += d.vy * (dt/16.7);
+        d.rot += d.spin * (dt/16.7);
+      }
+      debris = debris.filter(d => d.x > -70 && d.x < canvas.width+70 && d.y < canvas.height+70);
+    }
+
+    // collisions
+    if (!transitioning && rocket.invulnMs <= 0) {
+      for (const d of debris) {
+        const dx = d.x - rocket.x;
+        const dy = d.y - rocket.y;
+        const rr = (rocket.radius*0.8) + d.size*0.45;
+        if (dx*dx + dy*dy < rr*rr && !d.hit) {
+          d.hit = true;
+          lives--;
+          rocket.invulnMs = 1200;
+          rocket.y += 10;
+          clampRocket();
+          updateHUD();
+          if (lives <= 0) { endGame(false); break; }
+        }
+      }
+    }
+
+    // draw world
+    drawDebris();
+    drawRocket();
+    drawHUD();
+
+    // check level progression
+    const L = LEVELS[levelIdx];
+    if (!transitioning && distance >= L.dist) {
+      if (levelIdx < LEVELS.length - 1) {
+        startPlanetTransition(LEVELS[levelIdx+1].name);
+      } else {
+        endGame(true);
+      }
+    }
+
+    // overlay transition if active
+    if (transitioning) drawPlanetTransition(ts);
+
+    if (running) requestAnimationFrame(step);
+  }
+
+  function endGame(win){
+    running = false;
+    modalTitle.textContent = win ? "You reached the Sun! ☀️" : "Game Over";
+    modalDesc.textContent = win
+      ? "Your rocket pup cruised through space and made it to the Sun!"
+      : "You ran out of lives. Want to try again? Your puppy image is saved.";
+    modal.style.display = 'flex';
+  }
+
+  // Start!
+  updateHUD();
+  requestAnimationFrame(step);
+})();
+</script>
+</body>
+</html>
